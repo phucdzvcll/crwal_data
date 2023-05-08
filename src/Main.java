@@ -1,28 +1,33 @@
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.json.JsonMapper;
-import com.fasterxml.jackson.databind.type.TypeFactory;
+import com.mongodb.ConnectionString;
+import com.mongodb.client.MongoClient;
+import com.mongodb.client.MongoClients;
+import com.mongodb.client.MongoCollection;
+import com.mongodb.client.MongoDatabase;
 import models.player_id;
-import models.raw_name;
-import org.json.simple.*;
-import org.json.simple.parser.*;
+import models.InternalRequest;
+import org.bson.Document;
 import org.openqa.selenium.By;
 import org.openqa.selenium.WebElement;
 import org.openqa.selenium.chrome.ChromeDriver;
 import org.openqa.selenium.devtools.DevTools;
 import org.openqa.selenium.devtools.v85.network.Network;
 import org.openqa.selenium.devtools.v85.network.model.RequestId;
-import org.openqa.selenium.devtools.v85.network.model.Response;
 
 import java.io.*;
-import java.util.ArrayList;
-import java.util.Optional;
+import java.net.URI;
+import java.net.URL;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.util.*;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 public class Main {
     static ObjectMapper mapper = new ObjectMapper();
-    static TypeFactory typeFactory = mapper.getTypeFactory();
     static ArrayList<String> uIds = new ArrayList<>();
-
-    static boolean isFirst = true;
 
     public static void main(String[] args) {
         System.setProperty("webdriver.chrome.driver", "/Users/phuc/Downloads/chromedriver_mac_arm64/chromedriver");
@@ -30,43 +35,87 @@ public class Main {
         DevTools devTools = driver.getDevTools();
         devTools.createSession();
         devTools.send(Network.enable(Optional.empty(), Optional.empty(), Optional.empty()));
-        devTools.addListener(Network.responseReceived(), responseReceived -> {
+        ArrayList<InternalRequest> requestIds = new ArrayList<>();
 
-            Response response = responseReceived.getResponse();
-            String url = response.getUrl();
-            Integer status = response.getStatus();
-            if (url.contains("https://en.fifaaddict.com/api2?q=fo4db&playername=") && status == 200) {
+        addListener(devTools, requestIds);
+
+        List<String> raw = getListPlayer();
+
+
+        driver.get("https://en.fifaaddict.com/");
+        raw.forEach(rawName -> {
+            try {
+                findPlayerByName(driver, rawName);
+            } catch (Exception e) {
+                System.out.println("player_error");
+                System.out.println(e.getMessage());
                 try {
-                    RequestId requestId = responseReceived.getRequestId();
-                    String body = devTools.send(Network.getResponseBody(requestId)).getBody();
-                    player_id participantJsonList = mapper.readValue(body, player_id.class);
+                    FileWriter myWriter2 = new FileWriter("player_error.txt", true);
+                    BufferedWriter bw = new BufferedWriter(myWriter2);
+                    PrintWriter pw = new PrintWriter(bw);
+                    pw.println(rawName);
+                    pw.close();
+                    bw.close();
+                    myWriter2.close();
+                } catch (IOException ex) {
+                    System.out.println(e.getMessage());
+                }
+            }
+        });
+        driver.close();
+        crawlPlayerInfo();
 
+
+    }
+
+    private static List<String> getListPlayer() {
+        List<String> raw = new ArrayList<>();
+        try (Stream<String> lines = Files.lines(Paths.get("/Users/phuc/Downloads/crwal data/player_unique.txt"))) {
+            raw = lines.collect(Collectors.toList());
+        } catch (IOException e) {
+            System.out.println(e.getMessage());
+        }
+        return raw;
+    }
+
+    private static void addListener(DevTools devTools, ArrayList<InternalRequest> requestIds) {
+        devTools.addListener(Network.requestWillBeSent(), requestWillBeSent -> {
+            String url = requestWillBeSent.getRequest().getUrl();
+            if (url.contains("https://en.fifaaddict.com/api2?q=fo4db&playername=")) {
+                RequestId requestId = requestWillBeSent.getRequestId();
+                requestIds.add(new InternalRequest(requestId, url));
+            }
+        });
+        devTools.addListener(Network.loadingFinished(), loadingFinished -> {
+            RequestId requestId = loadingFinished.getRequestId();
+            InternalRequest rq = null;
+            for (InternalRequest request : requestIds) {
+                if (request.getRequestId().toString().equals(requestId.toString())) {
+                    rq = request;
+                    break;
+                }
+            }
+            if (rq != null) {
+                try {
+                    String body = devTools.send(Network.getResponseBody(rq.getRequestId())).getBody();
+                    player_id participantJsonList = mapper.readValue(body, player_id.class);
                     FileWriter myWriter;
                     if (participantJsonList.db.isEmpty()) {
                         myWriter = new FileWriter("player_miss.txt", true);
                         BufferedWriter bw = new BufferedWriter(myWriter);
                         PrintWriter pw = new PrintWriter(bw);
-                        pw.println(url);
+                        String decodedUrl = URLDecoder.decode(rq.getRequestUrl(), StandardCharsets.UTF_8);
+                        URL parsedUrl = new URL(decodedUrl);
+                        String playerName = URLDecoder.decode(parsedUrl.getQuery().split("&")[1].split("=")[1], StandardCharsets.UTF_8);
+                        pw.println(playerName);
                         pw.close();
                         bw.close();
+                        myWriter.close();
                     } else {
-                        myWriter = new FileWriter("player_id.txt", true);
-                        BufferedWriter bw = new BufferedWriter(myWriter);
-                        PrintWriter pw = new PrintWriter(bw);
                         participantJsonList.db.forEach(uid -> {
                             uIds.add(uid.uid);
-                            pw.println(uid.uid);
                         });
-
-                        if (isFirst) {
-                            isFirst = false;
-                            crawlPlayerInfo();
-                        }
-
-                        pw.close();
-                        bw.close();
                     }
-                    myWriter.close();
 
                 } catch (Exception e) {
                     System.out.println(e.getMessage());
@@ -74,7 +123,10 @@ public class Main {
                         FileWriter myWriter2 = new FileWriter("player_error.txt", true);
                         BufferedWriter bw = new BufferedWriter(myWriter2);
                         PrintWriter pw = new PrintWriter(bw);
-                        pw.println(url);
+                        String decodedUrl = URLDecoder.decode(rq.getRequestUrl(), StandardCharsets.UTF_8);
+                        URL parsedUrl = new URL(decodedUrl);
+                        String playerName = URLDecoder.decode(parsedUrl.getQuery().split("&")[1].split("=")[1], StandardCharsets.UTF_8);
+                        pw.println(playerName);
                         pw.close();
                         bw.close();
                         myWriter2.close();
@@ -83,104 +135,40 @@ public class Main {
                     }
                 }
             }
-
         });
-        ArrayList<raw_name> raw = new ArrayList<>();
-        JSONParser parser = new JSONParser();
-        try {
-            Object obj = parser.parse(new FileReader("/Users/phuc/Downloads/crwal data/src/player_fo4.json"));
-            JSONArray jsonObject = (JSONArray) obj;
-            String jsonString = jsonObject.toJSONString();
-            raw = mapper.readValue(jsonString, typeFactory.constructCollectionType(ArrayList.class, raw_name.class));
-        } catch (Exception e) {
-            System.out.println(e.getMessage());
-        }
-
-
-        driver.get("https://en.fifaaddict.com/");
-        raw.forEach(rawName -> {
-            try {
-                FileWriter myWriter = new FileWriter("player_id.txt", true);
-                BufferedWriter bw = new BufferedWriter(myWriter);
-                PrintWriter pw = new PrintWriter(bw);
-                pw.println("Player: " + rawName.name);
-                pw.close();
-                bw.close();
-                myWriter.close();
-                findPlayerByName(driver, rawName.name);
-            } catch (Exception e) {
-                System.out.println(e.getMessage());
-                try {
-                    FileWriter myWriter2 = new FileWriter("player_error.txt", true);
-                    System.out.println(e.getMessage());
-                    BufferedWriter bw = new BufferedWriter(myWriter2);
-                    PrintWriter pw = new PrintWriter(bw);
-                    pw.println(rawName.name);
-                    pw.close();
-                    bw.close();
-                    myWriter2.close();
-                } catch (IOException ex) {
-                    System.out.println(ex.getMessage());
-                }
-            }
-
-        });
-
     }
 
     private static void crawlPlayerInfo() {
+
+        uIds.forEach(s -> {
+            try {
+                FileWriter myWriter2 = new FileWriter("player_id.txt", true);
+                BufferedWriter bw = new BufferedWriter(myWriter2);
+                PrintWriter pw = new PrintWriter(bw);
+                pw.println(s);
+                pw.close();
+                bw.close();
+                myWriter2.close();
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        });
+
+        String uri = "mongodb://root:example@localhost:27017/";
+
+        ConnectionString connectionString = new ConnectionString(uri);
+        MongoClient mongoClient = MongoClients.create(connectionString);
+        MongoDatabase database = mongoClient.getDatabase("player");
+        MongoCollection<Document> collection = database.getCollection("player_info");
         ChromeDriver playerInfoPlayer = new ChromeDriver();
         DevTools devTools = playerInfoPlayer.getDevTools();
         devTools.createSession();
         devTools.send(Network.enable(Optional.empty(), Optional.empty(), Optional.empty()));
-        devTools.addListener(Network.responseReceived(), responseReceived -> {
-            Response response = responseReceived.getResponse();
-            String url = response.getUrl();
-            Integer status = response.getStatus();
-            if (url.contains("https://en.fifaaddict.com/api2?fo4pid=") && status == 200) {
-                try {
-                    RequestId requestId = responseReceived.getRequestId();
-                    String body = devTools.send(Network.getResponseBody(requestId)).getBody();
 
-                    JSONParser parser = new JSONParser();
-                    JSONObject json = (JSONObject) parser.parse(body);
-                    json.remove("dbrelate");
 
-                    FileWriter myWriter;
-                    if (json.isEmpty()) {
-                        myWriter = new FileWriter("player_info_error.txt", true);
-                        BufferedWriter bw = new BufferedWriter(myWriter);
-                        PrintWriter pw = new PrintWriter(bw);
-                        pw.println(url);
-                        pw.close();
-                        bw.close();
-                    } else {
-                        myWriter = new FileWriter("player_info.json", true);
-                        BufferedWriter bw = new BufferedWriter(myWriter);
-                        PrintWriter pw = new PrintWriter(bw);
-                        pw.println("," + json);
-                        pw.close();
-                        bw.close();
-                    }
-                    myWriter.close();
+        ArrayList<InternalRequest> requestIds = new ArrayList<>();
+        playerInfoAddListener(collection, devTools, requestIds);
 
-                } catch (Exception e) {
-                    System.out.println(e.getMessage());
-                    try {
-                        FileWriter myWriter2 = new FileWriter("player_info_error.txt", true);
-                        BufferedWriter bw = new BufferedWriter(myWriter2);
-                        PrintWriter pw = new PrintWriter(bw);
-                        pw.println(url);
-                        pw.close();
-                        bw.close();
-                        myWriter2.close();
-                    } catch (Exception ex) {
-                        System.out.println(ex.getMessage());
-                    }
-                }
-            }
-
-        });
         int i = 0;
         boolean first = true;
         while (i < uIds.size()) {
@@ -191,48 +179,87 @@ public class Main {
                 playerInfoPlayer.navigate().to("https://en.fifaaddict.com/fo4db/pid" + uIds.get(i));
             }
             i++;
-
+            playerInfoPlayer.manage().deleteAllCookies();
         }
+        playerInfoPlayer.close();
+    }
+
+    private static void playerInfoAddListener(MongoCollection<Document> collection, DevTools devTools, ArrayList<InternalRequest> requestIds) {
+        devTools.addListener(Network.requestWillBeSent(), requestWillBeSent -> {
+            String url = requestWillBeSent.getRequest().getUrl();
+            if (url.contains("https://en.fifaaddict.com/api2?fo4pid=")) {
+                requestIds.add(new InternalRequest(requestWillBeSent.getRequestId(), url));
+            }
+        });
+
+
+        devTools.addListener(Network.loadingFinished(), loadingFinished -> {
+
+            RequestId requestId = loadingFinished.getRequestId();
+            InternalRequest rq = null;
+            for (InternalRequest request : requestIds) {
+                if (request.getRequestId().toString().equals(requestId.toString())) {
+                    rq = request;
+                    break;
+                }
+            }
+            if (rq != null) {
+                try {
+                    String body = devTools.send(Network.getResponseBody(requestId)).getBody();
+                    Document json = Document.parse(body);
+                    if (json.isEmpty()) {
+                        FileWriter myWriter = new FileWriter("player_info_error.txt", true);
+                        BufferedWriter bw = new BufferedWriter(myWriter);
+                        PrintWriter pw = new PrintWriter(bw);
+                        pw.println(rq.getRequestUrl());
+                        pw.close();
+                        bw.close();
+                        myWriter.close();
+                    } else {
+                        json.remove("dbrelate");
+
+
+                        Document existingDoc = collection.find(new Document("db.uid", json.get("db", Document.class).getString("uid"))).first();
+                        if (existingDoc != null) {
+                            System.out.println("Document with ID " + json.get("db", Document.class).getString("uid") + " already exists.");
+                        } else {
+                            collection.insertOne(json);
+                            System.out.println("Inserted document with ID " + json.get("db", Document.class).getString("uid"));
+                        }
+
+                        collection.replaceOne(json, json);
+                    }
+                } catch (Exception e) {
+                    System.out.println(e.getMessage());
+                    try {
+                        FileWriter myWriter2 = new FileWriter("player_info_error.txt", true);
+                        BufferedWriter bw = new BufferedWriter(myWriter2);
+                        PrintWriter pw = new PrintWriter(bw);
+                        pw.println(rq.getRequestUrl());
+                        pw.close();
+                        bw.close();
+                        myWriter2.close();
+                    } catch (Exception ex) {
+                        System.out.println(e.getMessage());
+                    }
+                }
+            }
+
+        });
     }
 
     private static void findPlayerByName(ChromeDriver driver, String name) {
-        driver.manage().deleteAllCookies();
         try {
-            Thread.sleep(150);
+            driver.manage().deleteAllCookies();
+            WebElement search_field = driver.findElement(By.id("fosPlayerName"));
+            search_field.clear();
+            search_field.sendKeys(name);
+            WebElement btn_search = driver.findElement(By.xpath("/html/body/div[1]/div/div/div[2]/div/div[2]/div/div[1]/form/div[1]/div/button[1]"));
+            btn_search.click();
+            Thread.sleep(500);
         } catch (InterruptedException ignored) {
 
         }
-        WebElement search_field = driver.findElement(By.id("fosPlayerName"));
-        try {
-            Thread.sleep(150);
-        } catch (InterruptedException ignored) {
-
-        }
-        search_field.clear();
-        try {
-            Thread.sleep(150);
-        } catch (InterruptedException ignored) {
-
-        }
-        search_field.sendKeys(name);
-        try {
-            Thread.sleep(150);
-        } catch (InterruptedException ignored) {
-
-        }
-        WebElement btn_search = driver.findElement(By.xpath("/html/body/div[1]/div/div/div[2]/div/div[2]/div/div[1]/form/div[1]/div/button[1]"));
-        try {
-            Thread.sleep(150);
-        } catch (InterruptedException ignored) {
-
-        }
-        btn_search.click();
-        try {
-            Thread.sleep(1000);
-        } catch (InterruptedException ignored) {
-
-        }
-
     }
 
 }
